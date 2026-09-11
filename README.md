@@ -67,10 +67,11 @@ retried. Home Assistant cannot cancel a source service call that is already
 executing; if a newer command arrives during that call, it executes next and
 the obsolete command receives no further attempts.
 
-Retryable results are `HomeAssistantError`, a missing/unavailable source, and a
-verification mismatch. Invalid service data terminates that command.
-Unexpected programming exceptions stop the affected worker and are surfaced in
-logs and diagnostics rather than silently retried.
+Retryable results are source integration runtime exceptions, a
+missing/unavailable source, and a verification mismatch. Invalid service data
+terminates that command. Unexpected programming exceptions outside the source
+service-call boundary stop the affected worker and are surfaced in logs and
+diagnostics rather than silently retried.
 
 ## Diagnostics
 
@@ -82,6 +83,8 @@ raw exception text. Downloadable diagnostics redact source identifiers.
 ## Limitations
 
 - A service call already executing in another integration cannot be recalled.
+  ReliableLight does not cancel timed-out service tasks because Home Assistant
+  source service handlers are not guaranteed to be cancellation-safe.
 - Source devices may quantize colors; verification tolerances compensate for
   normal rounding but cannot guarantee identical physical output.
 - Some template or custom group structures do not publish enough membership
@@ -103,7 +106,7 @@ python -m pytest --cov=custom_components.reliable_light --cov-report=term-missin
 
 ReliableLight follows Semantic Versioning. Before publishing a GitHub release,
 update `custom_components/reliable_light/manifest.json` and `CHANGELOG.md`, then
-create a release tag such as `v0.1.1`. HACS uses published GitHub releases when
+create a release tag such as `v0.1.2`. HACS uses published GitHub releases when
 they exist and otherwise installs the default branch.
 
 ## License

@@ -29,8 +29,8 @@ def test_manifest_discovery_classification_and_version() -> None:
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert manifest["integration_type"] == "hub"
     assert manifest["single_config_entry"] is True
-    assert manifest["version"] == "0.1.1"
-    assert 'version = "0.1.1"' in project
+    assert manifest["version"] == "0.1.2"
+    assert 'version = "0.1.2"' in project
 
 
 def test_single_instance_abort_text_guides_existing_entry_configuration() -> None:

@@ -96,6 +96,7 @@ class ReliableLightWorker:
         self._closing = False
         self._failed = False
         self._last_result = "idle"
+        self._last_source_exception_type: str | None = None
         self._last_verified_at: str | None = None
         self._next_retry_at: str | None = None
 
@@ -513,8 +514,14 @@ class ReliableLightWorker:
                 )
             except ServiceValidationError:
                 return "invalid"
-            except HomeAssistantError:
+            except HomeAssistantError as err:
+                self._source_service_failed(err)
                 return "service_error"
+            except Exception as err:  # noqa: BLE001
+                self._source_service_failed(err)
+                return "service_error"
+            else:
+                self._last_source_exception_type = None
         finally:
             self._active_contexts.discard(call_context.id)
 
@@ -546,6 +553,18 @@ class ReliableLightWorker:
         ):
             return "verified"
         return "verification_failed"
+
+    def _source_service_failed(self, error: Exception) -> None:
+        """Log a source service exception once per consecutive exception type."""
+        exception_type = type(error).__name__
+        if exception_type == self._last_source_exception_type:
+            return
+        self._last_source_exception_type = exception_type
+        _LOGGER.warning(
+            "Source service call failed for registry id %s with %s; will retry",
+            self._source_registry_id,
+            exception_type,
+        )
 
     def _source_state(self) -> State | None:
         source_entity_id = self._source_entity_id()

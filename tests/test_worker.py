@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.components.light import ATTR_BRIGHTNESS
@@ -145,21 +146,95 @@ async def test_validation_error_is_terminal(hass: HomeAssistant) -> None:
     await worker.async_shutdown()
 
 
-async def test_unexpected_error_marks_worker_failed(hass: HomeAssistant) -> None:
-    """Surface programming failures instead of retrying them."""
+async def test_unexpected_error_outside_service_marks_worker_failed(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """Surface programming failures outside the source service boundary."""
     hass.states.async_set("light.source", STATE_OFF)
 
-    async def turn_on(_call) -> None:
+    def broken_source_state() -> None:
         msg = "programming failure"
+        raise RuntimeError(msg)
+
+    worker = make_worker(hass, "light.source")
+    monkeypatch.setattr(worker, "_source_state", broken_source_state)
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.sleep(0.02)
+    assert worker.failed
+    assert worker.diagnostics()["last_result"] == "worker_failed"
+    await worker.async_shutdown()
+
+
+async def test_source_runtime_exception_retries_and_recovers(
+    hass: HomeAssistant, caplog
+) -> None:
+    """Retry arbitrary source runtime failures without failing the worker."""
+    hass.states.async_set("light.source", STATE_OFF)
+    calls = 0
+
+    async def turn_on(_call) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            msg = "sensitive source details"
+            raise RuntimeError(msg)
+        hass.states.async_set("light.source", STATE_ON)
+
+    hass.services.async_register("light", "turn_on", turn_on)
+    worker = make_worker(hass, "light.source")
+    with caplog.at_level(logging.WARNING):
+        worker.start()
+        await worker.async_submit("turn_on", {}, None)
+        await asyncio.sleep(0.08)
+
+    assert calls >= 3
+    assert not worker.failed
+    assert not worker.has_pending
+    assert worker.diagnostics()["last_result"] == "verified"
+    matching_logs = [
+        record
+        for record in caplog.records
+        if "Source service call failed for registry id" in record.message
+    ]
+    assert len(matching_logs) == 1
+    assert "RuntimeError" in matching_logs[0].message
+    assert "sensitive source details" not in caplog.text
+    await worker.async_shutdown()
+
+
+async def test_source_runtime_failure_respects_inflight_supersession(
+    hass: HomeAssistant,
+) -> None:
+    """Do not retry an old generation replaced during a failing source call."""
+    hass.states.async_set("light.source", STATE_OFF)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    turn_on_calls = 0
+
+    async def turn_on(_call) -> None:
+        nonlocal turn_on_calls
+        turn_on_calls += 1
+        started.set()
+        await release.wait()
+        msg = "source runtime failure"
         raise RuntimeError(msg)
 
     hass.services.async_register("light", "turn_on", turn_on)
     worker = make_worker(hass, "light.source")
     worker.start()
     await worker.async_submit("turn_on", {}, None)
-    await asyncio.sleep(0.02)
-    assert worker.failed
-    assert worker.diagnostics()["last_result"] == "worker_failed"
+    await asyncio.wait_for(started.wait(), 1)
+    old_generation = worker._generation
+    await worker.async_submit("turn_off", {}, None)
+    assert worker._generation == old_generation + 1
+    release.set()
+    await asyncio.sleep(0.04)
+
+    assert turn_on_calls == 1
+    assert not worker.failed
+    assert not worker.has_pending
+    assert worker.diagnostics()["last_result"] == "verified"
     await worker.async_shutdown()
 
 

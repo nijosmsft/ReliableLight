@@ -4,6 +4,11 @@ All notable changes are documented here. ReliableLight follows Semantic
 Versioning, and the version in `manifest.json` matches each GitHub release tag
 without the leading `v`.
 
+## 0.1.2 - 2026-09-11
+
+- Retry source integration runtime exceptions without failing the proxy worker.
+- Rate-limit source exception warnings by consecutive exception type.
+
 ## 0.1.1 - 2026-09-11
 
 - Classify ReliableLight as a hub so it appears in normal integration search.
