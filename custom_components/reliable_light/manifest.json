@@ -1,0 +1,14 @@
+{
+  "domain": "reliable_light",
+  "name": "ReliableLight",
+  "codeowners": ["@nijosmsft"],
+  "config_flow": true,
+  "documentation": "https://github.com/nijosmsft/ReliableLight",
+  "integration_type": "helper",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/nijosmsft/ReliableLight/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
+

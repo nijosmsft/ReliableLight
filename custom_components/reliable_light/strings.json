@@ -1,0 +1,69 @@
+{
+  "title": "ReliableLight",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Choose source lights",
+        "description": "Create a reliable proxy for each selected light.",
+        "data": {
+          "source_entity_registry_ids": "Source lights"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "ReliableLight is already configured."
+    },
+    "error": {
+      "source_not_registered": "Every source must be a registered light entity.",
+      "reliable_light_source": "A ReliableLight proxy cannot be used as a source.",
+      "source_cycle": "The selected source contains a detectable ReliableLight cycle.",
+      "duplicate_source": "A source light was selected more than once.",
+      "no_sources": "Select at least one source light."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ReliableLight options",
+        "description": "Persistent retry requires a finite command expiry between 30 and 86400 seconds. Set expiry to 0 only when persistent retry is disabled.",
+        "data": {
+          "source_entity_registry_ids": "Source lights",
+          "retry_initial_seconds": "Initial retry delay (seconds)",
+          "retry_max_seconds": "Maximum retry delay (seconds)",
+          "verification_delay_seconds": "Verification delay (seconds)",
+          "verification_tolerance": "Verification tolerance",
+          "command_expiry_seconds": "Command expiry (seconds, 0 disables)",
+          "persistent_retry": "Persist pending commands across restart",
+          "diagnostic_attributes": "Expose pending diagnostics as attributes",
+          "emit_diagnostic_events": "Emit reliable_light_command_status events"
+        }
+      }
+    },
+    "error": {
+      "source_not_registered": "Every source must be a registered light entity.",
+      "reliable_light_source": "A ReliableLight proxy cannot be used as a source.",
+      "source_cycle": "The selected source contains a detectable ReliableLight cycle.",
+      "duplicate_source": "A source light was selected more than once.",
+      "no_sources": "Select at least one source light.",
+      "invalid_backoff": "The initial retry delay must not exceed the maximum retry delay.",
+      "persistent_expiry_required": "Persistent retry requires an expiry between 30 and 86400 seconds."
+    }
+  },
+  "selector": {
+    "verification_tolerance": {
+      "options": {
+        "strict": "Strict",
+        "normal": "Normal",
+        "relaxed": "Relaxed"
+      }
+    }
+  },
+  "entity": {
+    "light": {
+      "proxy": {
+        "name": "Reliable"
+      }
+    }
+  }
+}
+
