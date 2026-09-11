@@ -4,6 +4,11 @@ All notable changes are documented here. ReliableLight follows Semantic
 Versioning, and the version in `manifest.json` matches each GitHub release tag
 without the leading `v`.
 
+## 0.1.3 - 2026-09-11
+
+- Generate new proxy entity IDs directly from the source object ID.
+- Preserve source-device association and readable, non-duplicated names.
+
 ## 0.1.2 - 2026-09-11
 
 - Retry source integration runtime exceptions without failing the proxy worker.

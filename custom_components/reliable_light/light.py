@@ -24,6 +24,9 @@ from homeassistant.components.light import (
     LightEntityFeature,
     valid_supported_color_modes,
 )
+from homeassistant.components.light import (
+    DOMAIN as LIGHT_DOMAIN,
+)
 from homeassistant.const import (
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
@@ -252,10 +255,15 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
             )
         object_id = source_entry.entity_id.partition(".")[2]
         self._attr_suggested_object_id = f"{object_id}_reliable"
-        if self.device_entry is None:
+        if self.entity_id is None:
+            # An initial entity_id is treated as an exact integration suggestion;
+            # the registry still wins for an existing stable unique ID.
+            self.entity_id = f"{LIGHT_DOMAIN}.{self._attr_suggested_object_id}"
+        source_name = er.async_get_unprefixed_name(self._hass_ref, source_entry)
+        if not source_name:
             source_state = self._hass_ref.states.get(source_entry.entity_id)
             source_name = source_state.name if source_state is not None else object_id
-            self._attr_name = f"{source_name} Reliable"
+        self._attr_name = f"{source_name} Reliable"
         self._apply_source_state(self._hass_ref.states.get(source_entry.entity_id))
 
     def _subscribe_source(self) -> None:
