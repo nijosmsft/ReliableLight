@@ -1,9 +1,9 @@
 """Tests for ReliableLight configuration flows."""
 
+from typing import TYPE_CHECKING
+
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.reliable_light.const import (
@@ -18,6 +18,10 @@ from custom_components.reliable_light.const import (
     CONF_VERIFICATION_TOLERANCE,
     DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import entity_registry as er
 
 
 async def test_config_flow_stores_registry_uuid(
@@ -48,6 +52,26 @@ async def test_rejects_reliable_proxy(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"]["base"] == "reliable_light_source"
+
+
+async def test_second_config_flow_aborts_with_single_instance(
+    hass: HomeAssistant, source_light: er.RegistryEntry
+) -> None:
+    """Keep one config entry and direct users to its options flow."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="ReliableLight",
+        data={CONF_SOURCES: [source_light.id]},
+        options={},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "single_instance_allowed"
 
 
 async def test_options_require_persistent_expiry(

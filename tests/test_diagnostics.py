@@ -1,13 +1,17 @@
 """Tests for ReliableLight diagnostics."""
 
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from typing import TYPE_CHECKING
+
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.reliable_light.const import CONF_SOURCES, DOMAIN
 from custom_components.reliable_light.diagnostics import (
     async_get_config_entry_diagnostics,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import entity_registry as er
 
 
 async def test_diagnostics_redact_sources(

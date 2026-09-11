@@ -103,7 +103,7 @@ python -m pytest --cov=custom_components.reliable_light --cov-report=term-missin
 
 ReliableLight follows Semantic Versioning. Before publishing a GitHub release,
 update `custom_components/reliable_light/manifest.json` and `CHANGELOG.md`, then
-create a release tag such as `v0.1.0`. HACS uses published GitHub releases when
+create a release tag such as `v0.1.1`. HACS uses published GitHub releases when
 they exist and otherwise installs the default branch.
 
 ## License

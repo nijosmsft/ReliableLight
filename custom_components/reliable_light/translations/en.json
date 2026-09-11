@@ -11,7 +11,7 @@
       }
     },
     "abort": {
-      "single_instance_allowed": "ReliableLight is already configured."
+      "single_instance_allowed": "ReliableLight is already configured. Manage source lights through Configure on the existing ReliableLight entry."
     },
     "error": {
       "source_not_registered": "Every source must be a registered light entity.",
