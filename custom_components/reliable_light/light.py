@@ -162,6 +162,7 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
     async def async_added_to_hass(self) -> None:
         """Subscribe to source changes and start the worker."""
         await super().async_added_to_hass()
+        self._resolve_source()
         if (
             self._source_state not in VALID_SOURCE_STATES
             and (last_state := await self.async_get_last_state()) is not None

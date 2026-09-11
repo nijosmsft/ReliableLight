@@ -225,3 +225,6 @@ async def test_existing_proxy_id_survives_source_rename_and_reload(
     proxy_entry = registry.async_get(existing_id)
     assert proxy_entry is not None
     assert proxy_entry.unique_id == source.id
+    proxy_state = hass.states.get(existing_id)
+    assert proxy_state is not None
+    assert proxy_state.attributes["source_entity_id"] == "light.renamed_ceiling_light"
