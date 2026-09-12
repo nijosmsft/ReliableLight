@@ -14,6 +14,7 @@ from homeassistant.components.light import (
 from homeassistant.components.light import (
     DOMAIN as LIGHT_DOMAIN,
 )
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.const import STATE_OFF
 from homeassistant.helpers import entity_registry as er
 
@@ -89,3 +90,41 @@ def reliable_proxy_entry(hass: HomeAssistant) -> er.RegistryEntry:
         original_name="Proxy",
         capabilities={ATTR_SUPPORTED_COLOR_MODES: [ColorMode.ONOFF]},
     )
+
+
+@pytest.fixture
+def power_switch(hass: HomeAssistant) -> er.RegistryEntry:
+    """Register a synthetic upstream power switch."""
+    registry = er.async_get(hass)
+    entry = registry.async_get_or_create(
+        SWITCH_DOMAIN,
+        "test",
+        "power-1",
+        suggested_object_id="power",
+        original_name="Power",
+    )
+    hass.states.async_set(entry.entity_id, STATE_OFF)
+    return entry
+
+
+@pytest.fixture
+def power_light(hass: HomeAssistant) -> er.RegistryEntry:
+    """Register a synthetic upstream power light."""
+    registry = er.async_get(hass)
+    entry = registry.async_get_or_create(
+        LIGHT_DOMAIN,
+        "test",
+        "power-light-1",
+        suggested_object_id="power_light",
+        original_name="Power Light",
+        capabilities={ATTR_SUPPORTED_COLOR_MODES: [ColorMode.ONOFF]},
+    )
+    hass.states.async_set(
+        entry.entity_id,
+        STATE_OFF,
+        {
+            ATTR_SUPPORTED_COLOR_MODES: [ColorMode.ONOFF],
+            ATTR_COLOR_MODE: ColorMode.ONOFF,
+        },
+    )
+    return entry

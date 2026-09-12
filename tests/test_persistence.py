@@ -368,3 +368,100 @@ async def test_restored_color_lists_are_accepted_by_service_and_verification(
     await asyncio.sleep(0.02)
     assert not worker.has_pending
     await worker.async_shutdown()
+
+
+async def test_discards_pending_command_when_power_fingerprint_changes(
+    hass: HomeAssistant,
+) -> None:
+    """Never replay intent under a different upstream power dependency."""
+    source = "fingerprint-source"
+    store = Store[dict](
+        hass, STORAGE_VERSION, f"{DOMAIN}.entry.{source}", atomic_writes=True
+    )
+    now = time.time()
+    await store.async_save(
+        {
+            "revision": 1,
+            "source_registry_id": source,
+            "last_generation": 1,
+            "pending": {
+                "action": "turn_on",
+                "kwargs": {},
+                "accepted_at": now,
+                "expires_at": now + 300,
+                "power_registry_id": "old-power",
+            },
+        }
+    )
+    worker = ReliableLightWorker(
+        hass,
+        "entry",
+        source,
+        persistent_options(),
+        lambda: "light.source",
+        lambda: None,
+        set(),
+        power_registry_id="new-power",
+        power_entity=lambda: ("switch", "switch.power"),
+    )
+    await worker.async_initialize()
+    assert not worker.has_pending
+    assert await store.async_load() is None
+    await worker.async_shutdown()
+
+
+async def test_restored_power_command_rechecks_compound_state(
+    hass: HomeAssistant,
+) -> None:
+    """Restore desired intent and restart sequencing from observed power state."""
+    source = "restore-power-source"
+    store = Store[dict](
+        hass, STORAGE_VERSION, f"{DOMAIN}.entry.{source}", atomic_writes=True
+    )
+    now = time.time()
+    await store.async_save(
+        {
+            "revision": 1,
+            "source_registry_id": source,
+            "last_generation": 1,
+            "pending": {
+                "action": "turn_on",
+                "kwargs": {},
+                "accepted_at": now,
+                "expires_at": now + 300,
+                "power_registry_id": "power-registry",
+            },
+        }
+    )
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_OFF)
+    calls: list[str] = []
+
+    async def power_on(_call) -> None:
+        calls.append("power")
+        hass.states.async_set("switch.power", STATE_ON)
+
+    async def source_on(_call) -> None:
+        calls.append("source")
+        hass.states.async_set("light.source", STATE_ON)
+
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = ReliableLightWorker(
+        hass,
+        "entry",
+        source,
+        persistent_options(),
+        lambda: "light.source",
+        lambda: None,
+        set(),
+        power_registry_id="power-registry",
+        power_entity=lambda: ("switch", "switch.power"),
+    )
+    await worker.async_initialize()
+    worker.start()
+    await asyncio.sleep(0.05)
+
+    assert calls == ["power", "source"]
+    assert not worker.has_pending
+    await worker.async_shutdown()

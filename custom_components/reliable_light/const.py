@@ -6,8 +6,12 @@ from homeassistant.const import Platform
 
 DOMAIN: Final = "reliable_light"
 PLATFORMS: Final = (Platform.LIGHT,)
+CONFIG_ENTRY_VERSION: Final = 2
 
 CONF_SOURCES: Final = "source_entity_registry_ids"
+CONF_SOURCE: Final = "source_entity_registry_id"
+CONF_POWER: Final = "power_entity_registry_id"
+SUBENTRY_TYPE_MANAGED_LIGHT: Final = "managed_light"
 CONF_RETRY_INITIAL: Final = "retry_initial_seconds"
 CONF_RETRY_MAX: Final = "retry_max_seconds"
 CONF_VERIFICATION_DELAY: Final = "verification_delay_seconds"
@@ -37,9 +41,14 @@ STORAGE_VERSION: Final = 1
 ATTR_SOURCE_ENTITY_ID: Final = "source_entity_id"
 ATTR_SOURCE_STATE: Final = "source_state"
 ATTR_SOURCE_AVAILABLE: Final = "source_available"
+ATTR_POWER_CONFIGURED: Final = "power_configured"
+ATTR_POWER_ENTITY_ID: Final = "power_entity_id"
+ATTR_POWER_STATE: Final = "power_state"
+ATTR_POWER_AVAILABLE: Final = "power_available"
 ATTR_LAST_KNOWN_STATE: Final = "last_known_state"
 ATTR_PENDING: Final = "pending"
 ATTR_PENDING_ACTION: Final = "pending_action"
+ATTR_PENDING_STAGE: Final = "pending_stage"
 ATTR_PENDING_SINCE: Final = "pending_since"
 ATTR_ATTEMPT_COUNT: Final = "attempt_count"
 ATTR_NEXT_RETRY_AT: Final = "next_retry_at"

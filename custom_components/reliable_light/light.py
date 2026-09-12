@@ -51,6 +51,11 @@ from .const import (
     ATTR_PENDING,
     ATTR_PENDING_ACTION,
     ATTR_PENDING_SINCE,
+    ATTR_PENDING_STAGE,
+    ATTR_POWER_AVAILABLE,
+    ATTR_POWER_CONFIGURED,
+    ATTR_POWER_ENTITY_ID,
+    ATTR_POWER_STATE,
     ATTR_SOURCE_AVAILABLE,
     ATTR_SOURCE_ENTITY_ID,
     ATTR_SOURCE_STATE,
@@ -63,7 +68,7 @@ if TYPE_CHECKING:
 
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-    from .model import ReliableLightConfigEntry
+    from .model import ManagedLightConfig, ReliableLightConfigEntry
 
 SUPPORTED_FEATURE_MASK = LightEntityFeature.EFFECT | LightEntityFeature.TRANSITION
 VALID_SOURCE_STATES = (STATE_ON, STATE_OFF)
@@ -76,14 +81,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up ReliableLight entities."""
     active_contexts: set[str] = set()
-    entities = [
-        ReliableLightEntity(hass, entry, source_id, active_contexts)
-        for source_id in entry.runtime_data.source_registry_ids
-    ]
-    entry.runtime_data.entities = {
-        entity.source_registry_id: entity for entity in entities
-    }
-    async_add_entities(entities)
+    entities: dict[str, ReliableLightEntity] = {}
+    for managed in entry.runtime_data.managed_lights:
+        entity = ReliableLightEntity(hass, entry, managed, active_contexts)
+        entities[managed.source_registry_id] = entity
+        async_add_entities([entity], config_subentry_id=managed.subentry_id)
+    entry.runtime_data.entities = entities
 
 
 class ReliableLightEntity(LightEntity, RestoreEntity):
@@ -97,31 +100,41 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
         self,
         hass: HomeAssistant,
         entry: ReliableLightConfigEntry,
-        source_registry_id: str,
+        managed: ManagedLightConfig,
         active_contexts: set[str],
     ) -> None:
         """Initialize a reliable proxy light."""
         self._hass_ref = hass
         self._entry = entry
-        self._source_registry_id = source_registry_id
+        self._source_registry_id = managed.source_registry_id
+        self._power_registry_id = managed.power_registry_id
         self._source_entity_id: str | None = None
+        self._power_entity_id: str | None = None
+        self._power_domain: str | None = None
         self._source_state = "missing"
+        self._power_state = "not_configured"
         self._last_known_state: str | None = None
-        self._state_unsub: Callable[[], None] | None = None
-        self._attr_unique_id = source_registry_id
+        self._state_unsubs: list[Callable[[], None]] = []
+        self._attr_unique_id = managed.source_registry_id
         self._attr_name = "Reliable"
         self._attr_assumed_state = True
         self._attr_is_on = None
         self._worker = ReliableLightWorker(
             hass,
             entry.entry_id,
-            source_registry_id,
+            managed.source_registry_id,
             entry.runtime_data.options,
             lambda: self._source_entity_id,
             self._async_worker_changed,
             active_contexts,
+            power_registry_id=managed.power_registry_id,
+            power_entity=lambda: (
+                (self._power_domain, self._power_entity_id)
+                if self._power_domain is not None and self._power_entity_id is not None
+                else None
+            ),
         )
-        self._resolve_source()
+        self._resolve_entities()
 
     @property
     def source_registry_id(self) -> str:
@@ -129,18 +142,31 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
         return self._source_registry_id
 
     @property
+    def power_registry_id(self) -> str | None:
+        """Return the stable power registry UUID."""
+        return self._power_registry_id
+
+    @property
     def available(self) -> bool:
-        """Keep the command endpoint callable during source outages."""
+        """Keep the command endpoint callable during dependency outages."""
         return not self._worker.failed
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return source and pending diagnostics."""
+        """Return source, power, and pending diagnostics."""
         attributes: dict[str, Any] = {
             ATTR_SOURCE_ENTITY_ID: self._source_entity_id,
             ATTR_SOURCE_STATE: self._source_state,
             ATTR_SOURCE_AVAILABLE: self._source_state
             not in ("missing", STATE_UNKNOWN, STATE_UNAVAILABLE),
+            ATTR_POWER_CONFIGURED: self._power_registry_id is not None,
+            ATTR_POWER_ENTITY_ID: self._power_entity_id,
+            ATTR_POWER_STATE: self._power_state,
+            ATTR_POWER_AVAILABLE: (
+                self._power_registry_id is None
+                or self._power_state
+                not in ("missing", STATE_UNKNOWN, STATE_UNAVAILABLE)
+            ),
             ATTR_LAST_KNOWN_STATE: self._last_known_state,
         }
         if self._entry.runtime_data.options.diagnostic_attributes:
@@ -149,6 +175,7 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
                 {
                     ATTR_PENDING: diagnostics["pending"],
                     ATTR_PENDING_ACTION: diagnostics["pending_action"],
+                    ATTR_PENDING_STAGE: diagnostics["pending_stage"],
                     ATTR_PENDING_SINCE: diagnostics["pending_since"],
                     ATTR_ATTEMPT_COUNT: diagnostics["attempt_count"],
                     ATTR_NEXT_RETRY_AT: diagnostics["next_retry_at"],
@@ -160,9 +187,9 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
         return attributes
 
     async def async_added_to_hass(self) -> None:
-        """Subscribe to source changes and start the worker."""
+        """Subscribe to source and power changes and start the worker."""
         await super().async_added_to_hass()
-        self._resolve_source()
+        self._resolve_entities()
         if (
             self._source_state not in VALID_SOURCE_STATES
             and (last_state := await self.async_get_last_state()) is not None
@@ -171,7 +198,7 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
             restored_last_known = last_state.attributes.get(ATTR_LAST_KNOWN_STATE)
             if restored_last_known in VALID_SOURCE_STATES:
                 self._last_known_state = restored_last_known
-        self._subscribe_source()
+        self._subscribe_states()
         self.async_on_remove(
             self.hass.bus.async_listen(
                 er.EVENT_ENTITY_REGISTRY_UPDATED,
@@ -184,9 +211,7 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Stop worker activity cleanly."""
-        if self._state_unsub is not None:
-            self._state_unsub()
-            self._state_unsub = None
+        self._unsubscribe_states()
         await self._worker.async_shutdown()
         await super().async_will_remove_from_hass()
 
@@ -210,91 +235,144 @@ class ReliableLightEntity(LightEntity, RestoreEntity):
             self.async_write_ha_state()
 
     @callback
-    def _async_source_changed(self, event: Event) -> None:
-        self._apply_source_state(event.data["new_state"])
+    def _async_observed_changed(self, _event: Event) -> None:
+        self._refresh_observed_states()
         self._worker.notify_source_change()
         self.async_write_ha_state()
 
     @callback
     def _async_registry_updated(self, event: Event) -> None:
         data = event.data
-        current = self._source_entity_id
-        if data.get("action") == "create" and current is None:
-            source_entry = er.async_get(self.hass).async_get(self._source_registry_id)
-            if source_entry is None:
-                return
-            self._resolve_source()
-            self._subscribe_source()
-            self._worker.notify_source_change()
-            self.async_write_ha_state()
+        changed_ids = {data.get("entity_id"), data.get("old_entity_id")}
+        if (
+            data.get("action") != "create"
+            and self._source_entity_id not in changed_ids
+            and self._power_entity_id not in changed_ids
+        ):
             return
-        if current not in (data.get("entity_id"), data.get("old_entity_id")):
+        registry = er.async_get(self.hass)
+        if (
+            data.get("action") == "create"
+            and registry.async_get(self._source_registry_id) is None
+            and (
+                self._power_registry_id is None
+                or registry.async_get(self._power_registry_id) is None
+            )
+        ):
             return
-        self._resolve_source()
-        self._subscribe_source()
+        self._resolve_entities()
+        self._subscribe_states()
         self._worker.notify_source_change()
         self.async_write_ha_state()
 
-    def _resolve_source(self) -> None:
+    def _resolve_entities(self) -> None:
         registry = er.async_get(self._hass_ref)
         source_entry = registry.async_get(self._source_registry_id)
         if source_entry is None:
             self._source_entity_id = None
             self.device_entry = None
-            self._apply_source_state(None)
-            return
-        self._source_entity_id = source_entry.entity_id
-        self.device_entry = async_entity_id_to_device(
-            self._hass_ref, source_entry.entity_id
-        )
-        if source_entry.capabilities:
-            self._update_capability_attributes(
-                {
-                    **source_entry.capabilities,
-                    "supported_features": source_entry.supported_features,
-                }
+        else:
+            self._source_entity_id = source_entry.entity_id
+            self.device_entry = async_entity_id_to_device(
+                self._hass_ref, source_entry.entity_id
             )
-        object_id = source_entry.entity_id.partition(".")[2]
-        self._attr_suggested_object_id = f"{object_id}_reliable"
-        if self.entity_id is None:
-            # An initial entity_id is treated as an exact integration suggestion;
-            # the registry still wins for an existing stable unique ID.
-            self.entity_id = f"{LIGHT_DOMAIN}.{self._attr_suggested_object_id}"
-        source_name = er.async_get_unprefixed_name(self._hass_ref, source_entry)
-        if not source_name:
-            source_state = self._hass_ref.states.get(source_entry.entity_id)
-            source_name = source_state.name if source_state is not None else object_id
-        self._attr_name = f"{source_name} Reliable"
-        self._apply_source_state(self._hass_ref.states.get(source_entry.entity_id))
+            if source_entry.capabilities:
+                self._update_capability_attributes(
+                    {
+                        **source_entry.capabilities,
+                        "supported_features": source_entry.supported_features,
+                    }
+                )
+            object_id = source_entry.entity_id.partition(".")[2]
+            self._attr_suggested_object_id = f"{object_id}_reliable"
+            if self.entity_id is None:
+                self.entity_id = f"{LIGHT_DOMAIN}.{self._attr_suggested_object_id}"
+            source_name = er.async_get_unprefixed_name(self._hass_ref, source_entry)
+            if not source_name:
+                source_state = self._hass_ref.states.get(source_entry.entity_id)
+                source_name = (
+                    source_state.name if source_state is not None else object_id
+                )
+            self._attr_name = f"{source_name} Reliable"
 
-    def _subscribe_source(self) -> None:
-        if self._state_unsub is not None:
-            self._state_unsub()
-            self._state_unsub = None
-        if self._source_entity_id is not None:
-            self._state_unsub = async_track_state_change_event(
-                self.hass,
-                [self._source_entity_id],
-                self._async_source_changed,
+        power_entry = (
+            registry.async_get(self._power_registry_id)
+            if self._power_registry_id is not None
+            else None
+        )
+        self._power_entity_id = (
+            power_entry.entity_id if power_entry is not None else None
+        )
+        self._power_domain = power_entry.domain if power_entry is not None else None
+        self._refresh_observed_states()
+
+    def _subscribe_states(self) -> None:
+        self._unsubscribe_states()
+        entity_ids = [
+            entity_id
+            for entity_id in (self._source_entity_id, self._power_entity_id)
+            if entity_id is not None
+        ]
+        if entity_ids:
+            self._state_unsubs.append(
+                async_track_state_change_event(
+                    self.hass,
+                    entity_ids,
+                    self._async_observed_changed,
+                )
             )
+
+    def _unsubscribe_states(self) -> None:
+        for unsubscribe in self._state_unsubs:
+            unsubscribe()
+        self._state_unsubs.clear()
+
+    def _refresh_observed_states(self) -> None:
+        source = (
+            self._hass_ref.states.get(self._source_entity_id)
+            if self._source_entity_id is not None
+            else None
+        )
+        power = (
+            self._hass_ref.states.get(self._power_entity_id)
+            if self._power_entity_id is not None
+            else None
+        )
+        self._source_state = source.state if source is not None else "missing"
+        self._power_state = (
+            "not_configured"
+            if self._power_registry_id is None
+            else power.state
+            if power is not None
+            else "missing"
+        )
+        if source is not None:
+            self._update_capabilities(source)
+            if source.state in VALID_SOURCE_STATES:
+                self._last_known_state = source.state
+
+        if self._power_registry_id is None:
+            self._apply_source_state(source)
+            return
+        if self._power_state == STATE_OFF:
+            self._attr_is_on = False
+            self._attr_assumed_state = False
+            self._clear_actual_attributes()
+            return
+        if self._power_state == STATE_ON and source is not None:
+            self._apply_source_state(source)
+            return
+        self._attr_is_on = None
+        self._attr_assumed_state = True
+        self._clear_actual_attributes()
 
     def _apply_source_state(self, state: State | None) -> None:
-        if state is None:
-            self._source_state = "missing"
+        if state is None or state.state not in VALID_SOURCE_STATES:
             self._attr_is_on = None
             self._attr_assumed_state = True
             self._clear_actual_attributes()
             return
 
-        self._source_state = state.state
-        self._update_capabilities(state)
-        if state.state not in VALID_SOURCE_STATES:
-            self._attr_is_on = None
-            self._attr_assumed_state = True
-            self._clear_actual_attributes()
-            return
-
-        self._last_known_state = state.state
         self._attr_is_on = state.state == STATE_ON
         self._attr_assumed_state = False
         attributes = state.attributes

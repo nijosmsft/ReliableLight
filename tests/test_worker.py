@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.components.light import ATTR_BRIGHTNESS
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
@@ -57,6 +57,28 @@ def make_worker(
         lambda: source_id,
         changed,
         set(),
+    )
+
+
+def make_power_worker(
+    hass: HomeAssistant,
+    *,
+    source_id: str = "light.source",
+    power_id: str = "switch.power",
+    power_domain: str = "switch",
+    worker_options: ReliableLightOptions | None = None,
+) -> ReliableLightWorker:
+    """Create a worker with an upstream power dependency."""
+    return ReliableLightWorker(
+        hass,
+        "entry",
+        "source-registry-id",
+        worker_options or options(),
+        lambda: source_id,
+        lambda: None,
+        set(),
+        power_registry_id="power-registry-id",
+        power_entity=lambda: (power_domain, power_id),
     )
 
 
@@ -372,4 +394,347 @@ async def test_completion_event_keeps_completed_generation_on_supersession(
     assert completed_event["generation"] == completed_generation
     assert completed_event["action"] == "turn_on"
     assert completed_event["generation"] != newer_generation
+    await worker.async_shutdown()
+
+
+async def test_switch_power_turn_on_orders_power_before_source(
+    hass: HomeAssistant,
+) -> None:
+    """Power is verified before the source receives its original kwargs."""
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_UNAVAILABLE)
+    calls: list[tuple[str, str, dict]] = []
+
+    async def power_on(call) -> None:
+        calls.append(("switch", "turn_on", dict(call.data)))
+        hass.states.async_set("switch.power", STATE_ON)
+        hass.states.async_set("light.source", STATE_OFF)
+
+    async def source_on(call) -> None:
+        calls.append(("light", "turn_on", dict(call.data)))
+        hass.states.async_set(
+            "light.source",
+            STATE_ON,
+            {ATTR_BRIGHTNESS: call.data[ATTR_BRIGHTNESS]},
+        )
+
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_on", {ATTR_BRIGHTNESS: 123}, None)
+    await asyncio.sleep(0.05)
+
+    assert [(domain, action) for domain, action, _data in calls] == [
+        ("switch", "turn_on"),
+        ("light", "turn_on"),
+    ]
+    assert calls[1][2][ATTR_BRIGHTNESS] == 123
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+
+async def test_light_power_dependency_uses_light_domain(
+    hass: HomeAssistant,
+) -> None:
+    """Registered light dependencies are commanded through the light domain."""
+    hass.states.async_set("light.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_OFF)
+    calls: list[str] = []
+
+    async def turn_on(call) -> None:
+        entity_id = call.data["entity_id"]
+        calls.append(entity_id)
+        hass.states.async_set(entity_id, STATE_ON)
+
+    hass.services.async_register("light", "turn_on", turn_on)
+    worker = make_power_worker(hass, power_id="light.power", power_domain="light")
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.sleep(0.04)
+
+    assert calls == ["light.power", "light.source"]
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+
+async def test_turn_on_waits_for_delayed_source_availability(
+    hass: HomeAssistant,
+) -> None:
+    """Do not command an unavailable source until power makes it available."""
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_UNAVAILABLE)
+    source_calls = 0
+
+    async def power_on(_call) -> None:
+        hass.states.async_set("switch.power", STATE_ON)
+
+    async def source_on(_call) -> None:
+        nonlocal source_calls
+        source_calls += 1
+        hass.states.async_set("light.source", STATE_ON)
+
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.sleep(0.02)
+    assert source_calls == 0
+    assert worker.diagnostics()["pending_stage"] == "source_available"
+
+    hass.states.async_set("light.source", STATE_OFF)
+    worker.notify_source_change()
+    await asyncio.sleep(0.04)
+    assert source_calls == 1
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+
+async def test_turn_off_verifies_source_before_power_off(
+    hass: HomeAssistant,
+) -> None:
+    """Never remove power until the source is observed off."""
+    hass.states.async_set("switch.power", STATE_ON)
+    hass.states.async_set("light.source", STATE_ON)
+    source_called = asyncio.Event()
+    allow_source_off = asyncio.Event()
+    power_calls = 0
+
+    async def source_off(_call) -> None:
+        source_called.set()
+        await allow_source_off.wait()
+        hass.states.async_set("light.source", STATE_OFF)
+
+    async def power_off(_call) -> None:
+        nonlocal power_calls
+        power_calls += 1
+        hass.states.async_set("switch.power", STATE_OFF)
+
+    hass.services.async_register("light", "turn_off", source_off)
+    hass.services.async_register("switch", "turn_off", power_off)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_off", {}, None)
+    await asyncio.wait_for(source_called.wait(), 1)
+    assert power_calls == 0
+    allow_source_off.set()
+    await asyncio.sleep(0.04)
+    assert power_calls == 1
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+
+async def test_power_already_off_succeeds_with_unavailable_source(
+    hass: HomeAssistant,
+) -> None:
+    """An off dependency proves the compound light is off."""
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_UNAVAILABLE)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_off", {}, None)
+    await asyncio.sleep(0.02)
+    assert not worker.has_pending
+    assert worker.diagnostics()["last_result"] == "verified"
+    await worker.async_shutdown()
+
+
+async def test_power_failures_retry_and_validation_is_terminal(
+    hass: HomeAssistant,
+) -> None:
+    """Retry runtime power failures but terminate invalid power calls."""
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_OFF)
+    calls = 0
+
+    async def power_on(_call) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            msg = "temporary"
+            raise RuntimeError(msg)
+        if calls == 2:
+            hass.states.async_set("switch.power", STATE_ON)
+            return
+
+    async def source_on(_call) -> None:
+        hass.states.async_set("light.source", STATE_ON)
+
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.sleep(0.07)
+    assert calls >= 2
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+    hass.states.async_set("switch.power", STATE_OFF)
+
+    async def invalid_power(_call) -> None:
+        msg = "invalid"
+        raise ServiceValidationError(msg)
+
+    hass.services.async_register("switch", "turn_on", invalid_power)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.sleep(0.03)
+    assert not worker.has_pending
+    assert worker.diagnostics()["last_result"] == "invalid"
+    await worker.async_shutdown()
+
+
+async def test_power_verification_mismatch_retries(
+    hass: HomeAssistant,
+) -> None:
+    """A successful power service call still retries until power is observed on."""
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_OFF)
+    calls = 0
+
+    async def power_on(_call) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            hass.states.async_set("switch.power", STATE_ON)
+
+    async def source_on(_call) -> None:
+        hass.states.async_set("light.source", STATE_ON)
+
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.sleep(0.07)
+
+    assert calls >= 2
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+
+async def test_supersession_during_power_on_recovers_with_new_off(
+    hass: HomeAssistant,
+) -> None:
+    """A stale power-on call is followed by the newer compound off intent."""
+    hass.states.async_set("switch.power", STATE_OFF)
+    hass.states.async_set("light.source", STATE_OFF)
+    power_started = asyncio.Event()
+    release_power = asyncio.Event()
+    source_on_calls = 0
+    power_off_calls = 0
+
+    async def power_on(_call) -> None:
+        power_started.set()
+        await release_power.wait()
+        hass.states.async_set("switch.power", STATE_ON)
+
+    async def source_on(_call) -> None:
+        nonlocal source_on_calls
+        source_on_calls += 1
+
+    async def power_off(_call) -> None:
+        nonlocal power_off_calls
+        power_off_calls += 1
+        hass.states.async_set("switch.power", STATE_OFF)
+
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("switch", "turn_off", power_off)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_on", {}, None)
+    await asyncio.wait_for(power_started.wait(), 1)
+    await worker.async_submit("turn_off", {}, None)
+    release_power.set()
+    await asyncio.sleep(0.05)
+
+    assert source_on_calls == 0
+    assert power_off_calls == 1
+    assert not worker.has_pending
+    await worker.async_shutdown()
+
+
+async def test_supersession_before_power_off_prevents_stale_dispatch(
+    hass: HomeAssistant,
+) -> None:
+    """A new generation arriving in source-off work keeps dependency power on."""
+    hass.states.async_set("switch.power", STATE_ON)
+    hass.states.async_set("light.source", STATE_ON)
+    source_started = asyncio.Event()
+    release_source = asyncio.Event()
+    power_off_calls = 0
+
+    async def source_off(_call) -> None:
+        source_started.set()
+        await release_source.wait()
+        hass.states.async_set("light.source", STATE_OFF)
+
+    async def source_on(_call) -> None:
+        hass.states.async_set("light.source", STATE_ON)
+
+    async def power_off(_call) -> None:
+        nonlocal power_off_calls
+        power_off_calls += 1
+
+    hass.services.async_register("light", "turn_off", source_off)
+    hass.services.async_register("light", "turn_on", source_on)
+    hass.services.async_register("switch", "turn_off", power_off)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_off", {}, None)
+    await asyncio.wait_for(source_started.wait(), 1)
+    await worker.async_submit("turn_on", {}, None)
+    release_source.set()
+    await asyncio.sleep(0.04)
+
+    assert power_off_calls == 0
+    assert not worker.has_pending
+    assert hass.states.get("switch.power").state == STATE_ON
+    assert hass.states.get("light.source").state == STATE_ON
+    await worker.async_shutdown()
+
+
+async def test_supersession_during_power_off_recovers_with_new_on(
+    hass: HomeAssistant,
+) -> None:
+    """A new on generation restores power after an in-flight stale power-off."""
+    hass.states.async_set("switch.power", STATE_ON)
+    hass.states.async_set("light.source", STATE_OFF)
+    power_off_started = asyncio.Event()
+    release_power_off = asyncio.Event()
+    calls: list[str] = []
+
+    async def power_off(_call) -> None:
+        calls.append("power_off")
+        power_off_started.set()
+        await release_power_off.wait()
+        hass.states.async_set("switch.power", STATE_OFF)
+
+    async def power_on(_call) -> None:
+        calls.append("power_on")
+        hass.states.async_set("switch.power", STATE_ON)
+
+    async def source_on(_call) -> None:
+        calls.append("source_on")
+        hass.states.async_set("light.source", STATE_ON)
+
+    hass.services.async_register("switch", "turn_off", power_off)
+    hass.services.async_register("switch", "turn_on", power_on)
+    hass.services.async_register("light", "turn_on", source_on)
+    worker = make_power_worker(hass)
+    worker.start()
+    await worker.async_submit("turn_off", {}, None)
+    await asyncio.wait_for(power_off_started.wait(), 1)
+    await worker.async_submit("turn_on", {}, None)
+    release_power_off.set()
+    await asyncio.sleep(0.06)
+
+    assert calls == ["power_off", "power_on", "source_on"]
+    assert not worker.has_pending
+    assert hass.states.get("switch.power").state == STATE_ON
+    assert hass.states.get("light.source").state == STATE_ON
     await worker.async_shutdown()

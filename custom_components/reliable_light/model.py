@@ -12,11 +12,14 @@ from .const import (
     CONF_DIAGNOSTIC_ATTRIBUTES,
     CONF_EMIT_EVENTS,
     CONF_PERSISTENT_RETRY,
+    CONF_POWER,
     CONF_RETRY_INITIAL,
     CONF_RETRY_MAX,
+    CONF_SOURCE,
     CONF_SOURCES,
     CONF_VERIFICATION_DELAY,
     CONF_VERIFICATION_TOLERANCE,
+    CONFIG_ENTRY_VERSION,
     DEFAULT_COMMAND_EXPIRY,
     DEFAULT_DIAGNOSTIC_ATTRIBUTES,
     DEFAULT_EMIT_EVENTS,
@@ -25,6 +28,7 @@ from .const import (
     DEFAULT_RETRY_MAX,
     DEFAULT_VERIFICATION_DELAY,
     DEFAULT_VERIFICATION_TOLERANCE,
+    SUBENTRY_TYPE_MANAGED_LIGHT,
 )
 
 if TYPE_CHECKING:
@@ -113,12 +117,21 @@ class DesiredCommand:
     restored: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ManagedLightConfig:
+    """One managed source and its optional upstream power dependency."""
+
+    subentry_id: str
+    source_registry_id: str
+    power_registry_id: str | None
+
+
 @dataclass(slots=True)
 class ReliableLightRuntime:
     """Runtime data stored on the config entry."""
 
     options: ReliableLightOptions
-    source_registry_ids: tuple[str, ...]
+    managed_lights: tuple[ManagedLightConfig, ...]
     entities: dict[str, Any]
 
 
@@ -127,5 +140,25 @@ type ReliableLightConfigEntry = ConfigEntry[ReliableLightRuntime]
 
 def configured_sources(entry: ConfigEntry) -> tuple[str, ...]:
     """Return the configured source registry UUIDs."""
+    managed = configured_managed_lights(entry)
+    if entry.version >= CONFIG_ENTRY_VERSION:
+        return tuple(item.source_registry_id for item in managed)
     values = entry.options.get(CONF_SOURCES, entry.data.get(CONF_SOURCES, []))
     return tuple(str(value) for value in values)
+
+
+def configured_managed_lights(entry: ConfigEntry) -> tuple[ManagedLightConfig, ...]:
+    """Return authoritative managed-light subentry configuration."""
+    return tuple(
+        ManagedLightConfig(
+            subentry_id=subentry.subentry_id,
+            source_registry_id=str(subentry.data[CONF_SOURCE]),
+            power_registry_id=(
+                str(subentry.data[CONF_POWER])
+                if subentry.data.get(CONF_POWER)
+                else None
+            ),
+        )
+        for subentry in entry.get_subentries_of_type(SUBENTRY_TYPE_MANAGED_LIGHT)
+        if CONF_SOURCE in subentry.data
+    )

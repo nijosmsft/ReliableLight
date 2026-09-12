@@ -29,15 +29,15 @@ def test_manifest_discovery_classification_and_version() -> None:
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert manifest["integration_type"] == "hub"
     assert manifest["single_config_entry"] is True
-    assert manifest["version"] == "0.1.3"
-    assert 'version = "0.1.3"' in project
+    assert manifest["version"] == "0.2.0"
+    assert 'version = "0.2.0"' in project
 
 
 def test_single_instance_abort_text_guides_existing_entry_configuration() -> None:
     """Tell users where to manage sources after singleton setup."""
     expected = (
-        "ReliableLight is already configured. Manage source lights through "
-        "Configure on the existing ReliableLight entry."
+        "ReliableLight is already configured. Use Add managed light on the "
+        "existing ReliableLight entry."
     )
     strings = json.loads(
         (ROOT / "custom_components" / "reliable_light" / "strings.json").read_text(

@@ -11,7 +11,7 @@
       }
     },
     "abort": {
-      "single_instance_allowed": "ReliableLight is already configured. Manage source lights through Configure on the existing ReliableLight entry."
+      "single_instance_allowed": "ReliableLight is already configured. Use Add managed light on the existing ReliableLight entry."
     },
     "error": {
       "source_not_registered": "Every source must be a registered light entity.",
@@ -21,13 +21,54 @@
       "no_sources": "Select at least one source light."
     }
   },
+  "config_subentries": {
+    "managed_light": {
+      "entry_type": "Managed light",
+      "initiate_flow": {
+        "user": "Add managed light",
+        "reconfigure": "Configure managed light"
+      },
+      "step": {
+        "user": {
+          "title": "Add managed light",
+          "description": "Choose a source light and, optionally, the light or switch that supplies its upstream power.",
+          "data": {
+            "source_entity_registry_id": "Source light",
+            "power_entity_registry_id": "Upstream power"
+          }
+        },
+        "reconfigure": {
+          "title": "Configure managed light",
+          "description": "The source is permanent for this managed light. Change or clear only its upstream power dependency.",
+          "data": {
+            "power_entity_registry_id": "Upstream power"
+          }
+        }
+      },
+      "error": {
+        "source_not_registered": "The source must be a registered light entity.",
+        "reliable_light_source": "A ReliableLight proxy cannot be used as a source.",
+        "source_cycle": "The source contains a detectable ReliableLight cycle.",
+        "duplicate_source": "This source light is already managed.",
+        "source_is_power_dependency": "This source is already used as another managed light's upstream power.",
+        "power_not_registered": "Upstream power must be a registered light or switch entity.",
+        "reliable_light_power": "A ReliableLight proxy cannot be used as upstream power.",
+        "power_is_source": "A source cannot be its own upstream power.",
+        "power_is_configured_source": "A managed source cannot also be used as upstream power.",
+        "duplicate_power": "This upstream power entity is already owned by another managed light.",
+        "power_cycle": "The source and upstream power contain a detectable group recursion."
+      },
+      "abort": {
+        "reconfigure_successful": "Managed light updated."
+      }
+    }
+  },
   "options": {
     "step": {
       "init": {
         "title": "ReliableLight options",
         "description": "Persistent retry requires a finite command expiry between 30 and 86400 seconds. Set expiry to 0 only when persistent retry is disabled.",
         "data": {
-          "source_entity_registry_ids": "Source lights",
           "retry_initial_seconds": "Initial retry delay (seconds)",
           "retry_max_seconds": "Maximum retry delay (seconds)",
           "verification_delay_seconds": "Verification delay (seconds)",

@@ -9,11 +9,14 @@ from homeassistant.components.light import (
 from homeassistant.components.light import (
     DOMAIN as LIGHT_DOMAIN,
 )
+from homeassistant.config_entries import ConfigSubentry
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     SERVICE_TURN_ON,
+    STATE_OFF,
     STATE_ON,
     STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
     EntityStateAttribute,
 )
 from homeassistant.core import HomeAssistant, ServiceCall, callback
@@ -29,11 +32,14 @@ from homeassistant.helpers import (
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.reliable_light.const import (
+    CONF_POWER,
     CONF_RETRY_INITIAL,
     CONF_RETRY_MAX,
+    CONF_SOURCE,
     CONF_SOURCES,
     CONF_VERIFICATION_DELAY,
     DOMAIN,
+    SUBENTRY_TYPE_MANAGED_LIGHT,
 )
 
 
@@ -228,3 +234,109 @@ async def test_existing_proxy_id_survives_source_rename_and_reload(
     proxy_state = hass.states.get(existing_id)
     assert proxy_state is not None
     assert proxy_state.attributes["source_entity_id"] == "light.renamed_ceiling_light"
+
+
+async def test_compound_proxy_state_truth_table(
+    hass: HomeAssistant,
+    source_light: er.RegistryEntry,
+    power_switch: er.RegistryEntry,
+) -> None:
+    """Power state controls compound proxy observability and off semantics."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="ReliableLight",
+        data={CONF_SOURCES: [source_light.id]},
+        options={},
+        version=2,
+        subentries_data=[
+            ConfigSubentry(
+                data={
+                    CONF_SOURCE: source_light.id,
+                    CONF_POWER: power_switch.id,
+                },
+                subentry_type=SUBENTRY_TYPE_MANAGED_LIGHT,
+                title="Source",
+                unique_id=source_light.id,
+            ).as_dict()
+        ],
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    proxy_id = er.async_get(hass).async_get_entity_id(
+        LIGHT_DOMAIN, DOMAIN, source_light.id
+    )
+    assert proxy_id is not None
+
+    hass.states.async_set(
+        source_light.entity_id,
+        STATE_ON,
+        {
+            ATTR_SUPPORTED_COLOR_MODES: [ColorMode.BRIGHTNESS],
+            ATTR_COLOR_MODE: ColorMode.BRIGHTNESS,
+            ATTR_BRIGHTNESS: 177,
+        },
+    )
+    hass.states.async_set(power_switch.entity_id, STATE_OFF)
+    await hass.async_block_till_done()
+    proxy = hass.states.get(proxy_id)
+    assert proxy is not None
+    assert proxy.state == STATE_OFF
+    assert proxy.attributes[ATTR_BRIGHTNESS] is None
+    assert proxy.attributes["power_available"] is True
+
+    hass.states.async_set(power_switch.entity_id, STATE_ON)
+    await hass.async_block_till_done()
+    proxy = hass.states.get(proxy_id)
+    assert proxy is not None
+    assert proxy.state == STATE_ON
+    assert proxy.attributes[ATTR_BRIGHTNESS] == 177
+
+    hass.states.async_set(source_light.entity_id, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    assert hass.states.get(proxy_id).state == STATE_UNKNOWN
+
+    hass.states.async_set(power_switch.entity_id, STATE_UNAVAILABLE)
+    hass.states.async_set(source_light.entity_id, STATE_OFF)
+    await hass.async_block_till_done()
+    proxy = hass.states.get(proxy_id)
+    assert proxy is not None
+    assert proxy.state == STATE_UNKNOWN
+    assert proxy.attributes["power_available"] is False
+
+
+async def test_deleting_last_subentry_does_not_restore_shadow_source(
+    hass: HomeAssistant, source_light: er.RegistryEntry
+) -> None:
+    """The compatibility shadow cannot recreate a deleted managed light."""
+    subentry = ConfigSubentry(
+        data={CONF_SOURCE: source_light.id},
+        subentry_type=SUBENTRY_TYPE_MANAGED_LIGHT,
+        title="Source",
+        unique_id=source_light.id,
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="ReliableLight",
+        data={CONF_SOURCES: [source_light.id]},
+        options={},
+        version=2,
+        subentries_data=[subentry.as_dict()],
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    proxy_id = er.async_get(hass).async_get_entity_id(
+        LIGHT_DOMAIN, DOMAIN, source_light.id
+    )
+    assert proxy_id is not None
+
+    assert hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
+    await hass.async_block_till_done()
+
+    assert not entry.subentries
+    assert entry.data[CONF_SOURCES] == []
+    assert (
+        er.async_get(hass).async_get_entity_id(LIGHT_DOMAIN, DOMAIN, source_light.id)
+        is None
+    )

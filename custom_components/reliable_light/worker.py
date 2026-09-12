@@ -14,7 +14,15 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.light import ATTR_TRANSITION
 from homeassistant.components.light import DOMAIN as LIGHT_DOMAIN
-from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_OFF, SERVICE_TURN_ON
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.storage import Store
@@ -69,12 +77,16 @@ class ReliableLightWorker:
         source_entity_id: Callable[[], str | None],
         state_changed: Callable[[], None],
         active_contexts: set[str],
+        power_registry_id: str | None = None,
+        power_entity: Callable[[], tuple[str, str] | None] | None = None,
     ) -> None:
         """Initialize an independent source command worker."""
         self._hass = hass
         self._source_registry_id = source_registry_id
+        self._power_registry_id = power_registry_id
         self._options = options
         self._source_entity_id = source_entity_id
+        self._power_entity = power_entity or (lambda: None)
         self._state_changed = state_changed
         self._active_contexts = active_contexts
         self._store = Store[dict[str, Any]](
@@ -96,9 +108,10 @@ class ReliableLightWorker:
         self._closing = False
         self._failed = False
         self._last_result = "idle"
-        self._last_source_exception_type: str | None = None
+        self._last_service_exception: tuple[str, str] | None = None
         self._last_verified_at: str | None = None
         self._next_retry_at: str | None = None
+        self._pending_stage: str | None = None
 
     @property
     def failed(self) -> bool:
@@ -131,6 +144,9 @@ class ReliableLightWorker:
         except (KeyError, TypeError, ValueError):
             await self._store.async_remove()
             return
+        if pending.get("power_registry_id") != self._power_registry_id:
+            await self._store.async_remove()
+            return
         now = time.time()
         if (
             action not in (SERVICE_TURN_ON, SERVICE_TURN_OFF)
@@ -155,6 +171,7 @@ class ReliableLightWorker:
             restored=True,
         )
         self._last_result = "restored"
+        self._pending_stage = "queued"
         self._schedule_persist()
         self._command_event.set()
 
@@ -204,6 +221,7 @@ class ReliableLightWorker:
                 context=context,
             )
             self._last_result = "accepted"
+            self._pending_stage = "queued"
             self._next_retry_at = None
             self._schedule_persist()
             self._command_event.set()
@@ -237,6 +255,7 @@ class ReliableLightWorker:
         return {
             "pending": command is not None,
             "pending_action": command.action if command else None,
+            "pending_stage": self._pending_stage if command else None,
             "pending_since": (
                 dt_util.utc_from_timestamp(command.accepted_at).isoformat()
                 if command
@@ -337,6 +356,7 @@ class ReliableLightWorker:
                 "kwargs": kwargs,
                 "accepted_at": command.accepted_at,
                 "expires_at": command.expires_at,
+                "power_registry_id": self._power_registry_id,
             }
         return {
             "revision": revision,
@@ -484,8 +504,17 @@ class ReliableLightWorker:
             await self._wait_for_wakeup(delay)
 
     async def _async_attempt(self, command: DesiredCommand) -> str:
+        if self._power_registry_id is None:
+            return await self._async_attempt_source_only(command)
+        if command.action == SERVICE_TURN_ON:
+            return await self._async_attempt_power_on(command)
+        return await self._async_attempt_power_off(command)
+
+    async def _async_attempt_source_only(self, command: DesiredCommand) -> str:
+        """Run the unchanged source-only command path."""
         if self._is_expired(command):
             return "expired"
+        self._set_stage(command, "source")
         state = self._source_state()
         if command_matches(
             state, command.action, command.kwargs, self._options.tolerance
@@ -498,6 +527,196 @@ class ReliableLightWorker:
         if not self._is_current(command.generation):
             return "superseded"
 
+        outcome = await self._async_service_call(
+            command,
+            LIGHT_DOMAIN,
+            command.action,
+            source_entity_id,
+            command.kwargs,
+            "source",
+        )
+        if outcome is not None:
+            return outcome
+
+        transition = float(command.kwargs.get(ATTR_TRANSITION, 0))
+        if outcome := await self._async_settle(
+            command, transition + self._options.verification_delay
+        ):
+            return outcome
+
+        if command_matches(
+            self._source_state(),
+            command.action,
+            command.kwargs,
+            self._options.tolerance,
+        ):
+            return "verified"
+        return "verification_failed"
+
+    async def _async_attempt_power_on(self, command: DesiredCommand) -> str:
+        """Turn on and verify power before commanding the source."""
+        power = self._power_entity()
+        if power is None:
+            self._set_stage(command, "power_on")
+            return "power_missing"
+        power_domain, power_entity_id = power
+        if self._power_state() != STATE_ON:
+            self._set_stage(command, "power_on")
+            outcome = await self._async_service_call(
+                command,
+                power_domain,
+                SERVICE_TURN_ON,
+                power_entity_id,
+                {},
+                "power",
+            )
+            if outcome is not None:
+                return outcome
+            if outcome := await self._async_settle(
+                command, self._options.verification_delay
+            ):
+                return outcome
+            if self._power_state() != STATE_ON:
+                return "power_verification_failed"
+
+        if not self._is_current(command.generation):
+            return "superseded"
+        if self._is_expired(command):
+            return "expired"
+        self._set_stage(command, "source_available")
+        source_state = self._source_state()
+        if source_state is None:
+            return "source_missing"
+        if source_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return "source_unavailable"
+        if command_matches(
+            source_state,
+            command.action,
+            command.kwargs,
+            self._options.tolerance,
+        ):
+            return "verified"
+
+        source_entity_id = self._source_entity_id()
+        if source_entity_id is None:
+            return "source_missing"
+        self._set_stage(command, "source_on")
+        outcome = await self._async_service_call(
+            command,
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            source_entity_id,
+            command.kwargs,
+            "source",
+        )
+        if outcome is not None:
+            return outcome
+        transition = float(command.kwargs.get(ATTR_TRANSITION, 0))
+        if outcome := await self._async_settle(
+            command, transition + self._options.verification_delay
+        ):
+            return outcome
+        if self._power_state() != STATE_ON:
+            return "power_verification_failed"
+        if command_matches(
+            self._source_state(),
+            command.action,
+            command.kwargs,
+            self._options.tolerance,
+        ):
+            return "verified"
+        return "verification_failed"
+
+    async def _async_attempt_power_off(self, command: DesiredCommand) -> str:
+        """Verify source off before turning off the dependency."""
+        power = self._power_entity()
+        if power is None:
+            self._set_stage(command, "power_off")
+            return "power_missing"
+        power_domain, power_entity_id = power
+        if self._power_state() == STATE_OFF:
+            return "verified"
+
+        source_state = self._source_state()
+        if not command_matches(
+            source_state,
+            SERVICE_TURN_OFF,
+            command.kwargs,
+            self._options.tolerance,
+        ):
+            source_entity_id = self._source_entity_id()
+            if source_entity_id is None:
+                self._set_stage(command, "source_off")
+                return "source_missing"
+            if source_state is None or source_state.state in (
+                STATE_UNKNOWN,
+                STATE_UNAVAILABLE,
+            ):
+                self._set_stage(command, "source_off")
+                return "source_unavailable"
+            self._set_stage(command, "source_off")
+            outcome = await self._async_service_call(
+                command,
+                LIGHT_DOMAIN,
+                SERVICE_TURN_OFF,
+                source_entity_id,
+                command.kwargs,
+                "source",
+            )
+            if outcome is not None:
+                return outcome
+            transition = float(command.kwargs.get(ATTR_TRANSITION, 0))
+            if outcome := await self._async_settle(
+                command, transition + self._options.verification_delay
+            ):
+                return outcome
+            if not command_matches(
+                self._source_state(),
+                SERVICE_TURN_OFF,
+                command.kwargs,
+                self._options.tolerance,
+            ):
+                return "verification_failed"
+
+        if not self._is_current(command.generation):
+            return "superseded"
+        if self._is_expired(command):
+            return "expired"
+        self._set_stage(command, "power_off")
+        if not self._is_current(command.generation):
+            return "superseded"
+        outcome = await self._async_service_call(
+            command,
+            power_domain,
+            SERVICE_TURN_OFF,
+            power_entity_id,
+            {},
+            "power",
+        )
+        if outcome is not None:
+            return outcome
+        if outcome := await self._async_settle(
+            command, self._options.verification_delay
+        ):
+            return outcome
+        if self._power_state() == STATE_OFF:
+            return "verified"
+        return "power_verification_failed"
+
+    async def _async_service_call(
+        self,
+        command: DesiredCommand,
+        domain: str,
+        action: str,
+        entity_id: str,
+        kwargs: dict[str, Any],
+        target: str,
+    ) -> str | None:
+        """Dispatch one guarded service call at the integration boundary."""
+        if not self._is_current(command.generation):
+            return "superseded"
+        if self._is_expired(command):
+            return "expired"
         call_context = Context(
             user_id=command.context.user_id if command.context is not None else None,
             parent_id=command.context.id if command.context is not None else None,
@@ -505,33 +724,41 @@ class ReliableLightWorker:
         self._active_contexts.add(call_context.id)
         try:
             try:
+                if not self._is_current(command.generation):
+                    return "superseded"
                 await self._hass.services.async_call(
-                    LIGHT_DOMAIN,
-                    command.action,
-                    {ATTR_ENTITY_ID: source_entity_id, **command.kwargs},
+                    domain,
+                    action,
+                    {ATTR_ENTITY_ID: entity_id, **kwargs},
                     blocking=True,
                     context=call_context,
                 )
             except ServiceValidationError:
                 return "invalid"
             except HomeAssistantError as err:
-                self._source_service_failed(err)
+                self._service_failed(err, target)
                 return "service_error"
             except Exception as err:  # noqa: BLE001
-                self._source_service_failed(err)
+                self._service_failed(err, target)
                 return "service_error"
             else:
-                self._last_source_exception_type = None
+                self._last_service_exception = None
         finally:
             self._active_contexts.discard(call_context.id)
-
         if not self._is_current(command.generation):
             return "superseded"
         if self._is_expired(command):
             return "expired"
+        return None
 
-        transition = float(command.kwargs.get(ATTR_TRANSITION, 0))
-        settle_delay = transition + self._options.verification_delay
+    async def _async_settle(
+        self, command: DesiredCommand, settle_delay: float
+    ) -> str | None:
+        """Wait for state propagation while remaining supersession-safe."""
+        if not self._is_current(command.generation):
+            return "superseded"
+        if self._is_expired(command):
+            return "expired"
         if command.expires_at is not None:
             settle_delay = min(
                 settle_delay,
@@ -544,24 +771,28 @@ class ReliableLightWorker:
                 return "superseded"
             if self._is_expired(command):
                 return "expired"
+        return None
 
-        if command_matches(
-            self._source_state(),
-            command.action,
-            command.kwargs,
-            self._options.tolerance,
-        ):
-            return "verified"
-        return "verification_failed"
+    def _set_stage(self, command: DesiredCommand, stage: str) -> None:
+        """Update the bounded diagnostic stage for the current generation."""
+        if self._is_current(command.generation) and self._pending_stage != stage:
+            self._pending_stage = stage
+            self._state_changed()
 
-    def _source_service_failed(self, error: Exception) -> None:
-        """Log a source service exception once per consecutive exception type."""
+    def _service_failed(self, error: Exception, target: str) -> None:
+        """Log a service exception once per consecutive exception type."""
         exception_type = type(error).__name__
-        if exception_type == self._last_source_exception_type:
+        exception_key = (target, exception_type)
+        if exception_key == self._last_service_exception:
             return
-        self._last_source_exception_type = exception_type
+        self._last_service_exception = exception_key
         _LOGGER.warning(
-            "Source service call failed for registry id %s with %s; will retry",
+            (
+                "Source service call failed for registry id %s with %s; will retry"
+                if target == "source"
+                else "Power service call failed for source registry id %s with %s; "
+                "will retry"
+            ),
             self._source_registry_id,
             exception_type,
         )
@@ -571,6 +802,16 @@ class ReliableLightWorker:
         return (
             self._hass.states.get(source_entity_id)
             if source_entity_id is not None
+            else None
+        )
+
+    def _power_state(self) -> str | None:
+        power = self._power_entity()
+        if power is None:
+            return None
+        return (
+            state.state
+            if (state := self._hass.states.get(power[1])) is not None
             else None
         )
 
@@ -585,6 +826,7 @@ class ReliableLightWorker:
             revision = self._revision
             self._last_result = result
             self._next_retry_at = None
+            self._pending_stage = None
             if result == "verified":
                 self._last_verified_at = dt_util.utcnow().isoformat()
             self._schedule_persist()
