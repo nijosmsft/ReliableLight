@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from .const import (
     CONF_SOURCE,
     CONF_SOURCES,
+    CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     MAX_COMMAND_EXPIRY,
@@ -75,19 +76,27 @@ async def async_migrate_entry(
     hass: HomeAssistant, entry: ReliableLightConfigEntry
 ) -> bool:
     """Migrate legacy source lists to managed-light config subentries."""
-    if entry.version >= CONFIG_ENTRY_VERSION:
+    if (
+        entry.version == CONFIG_ENTRY_VERSION
+        and entry.minor_version >= CONFIG_ENTRY_MINOR_VERSION
+    ):
         return True
 
-    source_ids = configured_sources(entry)
-    _add_missing_subentries(hass, entry, source_ids)
-    options = dict(entry.options)
-    options.pop(CONF_SOURCES, None)
+    if entry.version < CONFIG_ENTRY_VERSION:
+        source_ids = configured_sources(entry)
+        _add_missing_subentries(hass, entry, source_ids)
+        options = dict(entry.options)
+        options.pop(CONF_SOURCES, None)
+        data = {**entry.data, CONF_SOURCES: list(source_ids)}
+    else:
+        options = dict(entry.options)
+        data = dict(entry.data)
     hass.config_entries.async_update_entry(
         entry,
-        data={**entry.data, CONF_SOURCES: list(source_ids)},
+        data=data,
         options=options,
         version=CONFIG_ENTRY_VERSION,
-        minor_version=1,
+        minor_version=CONFIG_ENTRY_MINOR_VERSION,
     )
     return True
 

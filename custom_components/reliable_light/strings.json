@@ -71,12 +71,16 @@
         "data": {
           "retry_initial_seconds": "Initial retry delay (seconds)",
           "retry_max_seconds": "Maximum retry delay (seconds)",
+          "power_recovery_delay_seconds": "Power recovery delay (seconds)",
           "verification_delay_seconds": "Verification delay (seconds)",
           "verification_tolerance": "Verification tolerance",
           "command_expiry_seconds": "Command expiry (seconds, 0 disables)",
           "persistent_retry": "Persist pending commands across restart",
           "diagnostic_attributes": "Expose pending diagnostics as attributes",
           "emit_diagnostic_events": "Emit reliable_light_command_status events"
+        },
+        "data_description": {
+          "power_recovery_delay_seconds": "Pause after verified recovery power-off before restoring power."
         }
       }
     },

@@ -554,13 +554,17 @@ class ReliableLightWorker:
         return "verification_failed"
 
     async def _async_attempt_power_on(self, command: DesiredCommand) -> str:
-        """Turn on and verify power before commanding the source."""
+        """Use upstream power only when startup or recovery requires it."""
         power = self._power_entity()
         if power is None:
             self._set_stage(command, "power_on")
             return "power_missing"
         power_domain, power_entity_id = power
-        if self._power_state() != STATE_ON:
+        power_state = self._power_state()
+        if power_state == STATE_OFF:
+            claim = await self._async_claim_power_recovery(command, cycle=False)
+            if claim == "superseded":
+                return claim
             self._set_stage(command, "power_on")
             outcome = await self._async_service_call(
                 command,
@@ -578,12 +582,44 @@ class ReliableLightWorker:
                 return outcome
             if self._power_state() != STATE_ON:
                 return "power_verification_failed"
+        elif power_state != STATE_ON:
+            self._set_stage(command, "power_wait")
+            return "power_unavailable"
 
         if not self._is_current(command.generation):
             return "superseded"
         if self._is_expired(command):
             return "expired"
-        self._set_stage(command, "source_available")
+        source_state = self._source_state()
+        if source_state is None or source_state.state in (
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
+        ):
+            claim = await self._async_claim_power_recovery(command, cycle=True)
+            if claim == "superseded":
+                return claim
+            if claim == "claimed":
+                outcome = await self._async_recover_power(
+                    command, power_domain, power_entity_id
+                )
+                if outcome is not None:
+                    return outcome
+                source_state = self._source_state()
+                if source_state is None:
+                    self._set_stage(command, "source_wait")
+                    return "source_missing"
+                if source_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+                    self._set_stage(command, "source_wait")
+                    return "source_unavailable"
+            else:
+                self._set_stage(command, "source_wait")
+                return "source_unavailable"
+
+        if not self._is_current(command.generation):
+            return "superseded"
+        if self._is_expired(command):
+            return "expired"
+        self._set_stage(command, "source_wait")
         source_state = self._source_state()
         if source_state is None:
             return "source_missing"
@@ -600,7 +636,7 @@ class ReliableLightWorker:
         source_entity_id = self._source_entity_id()
         if source_entity_id is None:
             return "source_missing"
-        self._set_stage(command, "source_on")
+        self._set_stage(command, "source_command")
         outcome = await self._async_service_call(
             command,
             LIGHT_DOMAIN,
@@ -628,33 +664,27 @@ class ReliableLightWorker:
         return "verification_failed"
 
     async def _async_attempt_power_off(self, command: DesiredCommand) -> str:
-        """Verify source off before turning off the dependency."""
-        power = self._power_entity()
-        if power is None:
-            self._set_stage(command, "power_off")
-            return "power_missing"
-        power_domain, power_entity_id = power
-        if self._power_state() == STATE_OFF:
+        """Leave healthy power on and use it only as an unavailable-source fallback."""
+        power_state = self._power_state()
+        if power_state == STATE_OFF:
             return "verified"
 
         source_state = self._source_state()
-        if not command_matches(
-            source_state,
-            SERVICE_TURN_OFF,
-            command.kwargs,
-            self._options.tolerance,
+        if source_state is not None and source_state.state not in (
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
         ):
+            if command_matches(
+                source_state,
+                SERVICE_TURN_OFF,
+                command.kwargs,
+                self._options.tolerance,
+            ):
+                return "verified"
             source_entity_id = self._source_entity_id()
             if source_entity_id is None:
-                self._set_stage(command, "source_off")
                 return "source_missing"
-            if source_state is None or source_state.state in (
-                STATE_UNKNOWN,
-                STATE_UNAVAILABLE,
-            ):
-                self._set_stage(command, "source_off")
-                return "source_unavailable"
-            self._set_stage(command, "source_off")
+            self._set_stage(command, "source_command")
             outcome = await self._async_service_call(
                 command,
                 LIGHT_DOMAIN,
@@ -677,12 +707,21 @@ class ReliableLightWorker:
                 self._options.tolerance,
             ):
                 return "verification_failed"
+            return "verified"
 
+        power = self._power_entity()
+        if power is None:
+            self._set_stage(command, "fallback_power_off")
+            return "power_missing"
+        power_domain, power_entity_id = power
+        if power_state != STATE_ON:
+            self._set_stage(command, "power_wait")
+            return "power_unavailable"
         if not self._is_current(command.generation):
             return "superseded"
         if self._is_expired(command):
             return "expired"
-        self._set_stage(command, "power_off")
+        self._set_stage(command, "fallback_power_off")
         if not self._is_current(command.generation):
             return "superseded"
         outcome = await self._async_service_call(
@@ -702,6 +741,87 @@ class ReliableLightWorker:
         if self._power_state() == STATE_OFF:
             return "verified"
         return "power_verification_failed"
+
+    async def _async_recover_power(
+        self, command: DesiredCommand, power_domain: str, power_entity_id: str
+    ) -> str | None:
+        """Perform the generation's single verified recovery power cycle."""
+        self._set_stage(command, "power_recovery_off")
+        outcome = await self._async_service_call(
+            command,
+            power_domain,
+            SERVICE_TURN_OFF,
+            power_entity_id,
+            {},
+            "power",
+        )
+        if outcome is not None:
+            return outcome
+        if outcome := await self._async_settle(
+            command, self._options.verification_delay
+        ):
+            return outcome
+        if self._power_state() != STATE_OFF:
+            return "power_verification_failed"
+
+        self._set_stage(command, "recovery_delay")
+        if outcome := await self._async_settle(
+            command, self._options.power_recovery_delay
+        ):
+            return outcome
+
+        power_state = self._power_state()
+        if power_state == STATE_ON:
+            return None
+        if power_state != STATE_OFF:
+            self._set_stage(command, "power_wait")
+            return "power_unavailable"
+
+        self._set_stage(command, "power_recovery_on")
+        outcome = await self._async_service_call(
+            command,
+            power_domain,
+            SERVICE_TURN_ON,
+            power_entity_id,
+            {},
+            "power",
+        )
+        if outcome is not None:
+            return outcome
+        if outcome := await self._async_settle(
+            command, self._options.verification_delay
+        ):
+            return outcome
+        if self._power_state() != STATE_ON:
+            return "power_verification_failed"
+        return None
+
+    async def _async_claim_power_recovery(
+        self, command: DesiredCommand, *, cycle: bool
+    ) -> str:
+        """Consume this generation's single power-recovery allowance."""
+        if not self._is_current(command.generation):
+            return "superseded"
+        async with self._lock:
+            if not self._is_current(command.generation):
+                return "superseded"
+            assert self._current is not None
+            if self._current.power_recovery_used:
+                return "used"
+            self._current = replace(self._current, power_recovery_used=True)
+        if cycle:
+            _LOGGER.info(
+                "Starting one-time power recovery for source registry id %s",
+                self._source_registry_id,
+            )
+            self._emit_status(
+                "power_recovery",
+                generation=command.generation,
+                action=command.action,
+                attempt_count=command.attempt_count,
+                stage="power_recovery_off",
+            )
+        return "claimed"
 
     async def _async_service_call(
         self,
@@ -888,6 +1008,7 @@ class ReliableLightWorker:
         generation: int | None = None,
         action: str | None = None,
         attempt_count: int | None = None,
+        stage: str | None = None,
     ) -> None:
         if not self._options.emit_events:
             return
@@ -916,5 +1037,6 @@ class ReliableLightWorker:
                     if command
                     else 0
                 ),
+                "stage": stage if stage is not None else self._pending_stage,
             },
         )

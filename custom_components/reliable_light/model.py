@@ -13,6 +13,7 @@ from .const import (
     CONF_EMIT_EVENTS,
     CONF_PERSISTENT_RETRY,
     CONF_POWER,
+    CONF_POWER_RECOVERY_DELAY,
     CONF_RETRY_INITIAL,
     CONF_RETRY_MAX,
     CONF_SOURCE,
@@ -24,6 +25,7 @@ from .const import (
     DEFAULT_DIAGNOSTIC_ATTRIBUTES,
     DEFAULT_EMIT_EVENTS,
     DEFAULT_PERSISTENT_RETRY,
+    DEFAULT_POWER_RECOVERY_DELAY,
     DEFAULT_RETRY_INITIAL,
     DEFAULT_RETRY_MAX,
     DEFAULT_VERIFICATION_DELAY,
@@ -60,6 +62,7 @@ class ReliableLightOptions:
 
     retry_initial: float
     retry_max: float
+    power_recovery_delay: float
     verification_delay: float
     tolerance_name: str
     command_expiry: int
@@ -79,6 +82,12 @@ class ReliableLightOptions:
         return cls(
             retry_initial=float(data.get(CONF_RETRY_INITIAL, DEFAULT_RETRY_INITIAL)),
             retry_max=float(data.get(CONF_RETRY_MAX, DEFAULT_RETRY_MAX)),
+            power_recovery_delay=float(
+                data.get(
+                    CONF_POWER_RECOVERY_DELAY,
+                    DEFAULT_POWER_RECOVERY_DELAY,
+                )
+            ),
             verification_delay=float(
                 data.get(CONF_VERIFICATION_DELAY, DEFAULT_VERIFICATION_DELAY)
             ),
@@ -115,6 +124,7 @@ class DesiredCommand:
     revision: int
     context: Context | None
     restored: bool = False
+    power_recovery_used: bool = False
 
 
 @dataclass(frozen=True, slots=True)

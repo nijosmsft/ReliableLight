@@ -18,17 +18,20 @@ from .const import (
     CONF_EMIT_EVENTS,
     CONF_PERSISTENT_RETRY,
     CONF_POWER,
+    CONF_POWER_RECOVERY_DELAY,
     CONF_RETRY_INITIAL,
     CONF_RETRY_MAX,
     CONF_SOURCE,
     CONF_SOURCES,
     CONF_VERIFICATION_DELAY,
     CONF_VERIFICATION_TOLERANCE,
+    CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     DEFAULT_COMMAND_EXPIRY,
     DEFAULT_DIAGNOSTIC_ATTRIBUTES,
     DEFAULT_EMIT_EVENTS,
     DEFAULT_PERSISTENT_RETRY,
+    DEFAULT_POWER_RECOVERY_DELAY,
     DEFAULT_RETRY_INITIAL,
     DEFAULT_RETRY_MAX,
     DEFAULT_VERIFICATION_DELAY,
@@ -245,7 +248,7 @@ class ReliableLightConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a ReliableLight config flow."""
 
     VERSION = CONFIG_ENTRY_VERSION
-    MINOR_VERSION = 1
+    MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
 
     @staticmethod
     @callback
@@ -432,6 +435,20 @@ class ReliableLightOptionsFlow(config_entries.OptionsFlow):
                         min=1,
                         max=3600,
                         step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_POWER_RECOVERY_DELAY,
+                    default=current.get(
+                        CONF_POWER_RECOVERY_DELAY,
+                        DEFAULT_POWER_RECOVERY_DELAY,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=60,
+                        step=0.1,
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),

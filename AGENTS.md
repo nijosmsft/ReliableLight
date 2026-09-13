@@ -7,7 +7,7 @@
 - Optional upstream power identity is also a registry UUID and has one owner.
 - Proxy state mirrors observed source state and must never be optimistic.
 - Each source owns one serialized worker. Check command generation around every
-  await and immediately before removing upstream power.
+  await and immediately before every upstream power action.
 - Catch HomeAssistantError and ServiceValidationError only where documented; unexpected exceptions must surface.
 - Persistent retry is opt-in, requires finite expiry, and persists before dispatch.
 - Do not advertise flash. Verify only explicitly requested steady-state attributes.

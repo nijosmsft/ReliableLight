@@ -15,6 +15,7 @@ from custom_components.reliable_light.const import (
     CONF_EMIT_EVENTS,
     CONF_PERSISTENT_RETRY,
     CONF_POWER,
+    CONF_POWER_RECOVERY_DELAY,
     CONF_RETRY_INITIAL,
     CONF_RETRY_MAX,
     CONF_SOURCE,
@@ -24,6 +25,7 @@ from custom_components.reliable_light.const import (
     DOMAIN,
     SUBENTRY_TYPE_MANAGED_LIGHT,
 )
+from custom_components.reliable_light.model import ReliableLightOptions
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -100,6 +102,7 @@ async def test_options_require_persistent_expiry(
         {
             CONF_RETRY_INITIAL: 1,
             CONF_RETRY_MAX: 10,
+            CONF_POWER_RECOVERY_DELAY: 2,
             CONF_VERIFICATION_DELAY: 0,
             CONF_VERIFICATION_TOLERANCE: "normal",
             CONF_COMMAND_EXPIRY: 0,
@@ -137,6 +140,7 @@ async def test_global_options_do_not_modify_managed_sources(
         {
             CONF_RETRY_INITIAL: 1,
             CONF_RETRY_MAX: 10,
+            CONF_POWER_RECOVERY_DELAY: 2,
             CONF_VERIFICATION_DELAY: 0,
             CONF_VERIFICATION_TOLERANCE: "normal",
             CONF_COMMAND_EXPIRY: 0,
@@ -147,6 +151,7 @@ async def test_global_options_do_not_modify_managed_sources(
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_POWER_RECOVERY_DELAY] == 2
     assert entry.data[CONF_SOURCES] == [source_light.id]
     assert entry.subentries[subentry.subentry_id].data == {CONF_SOURCE: source_light.id}
 
@@ -195,6 +200,72 @@ async def test_legacy_migration_preserves_proxy_identity_and_custom_name(
 
     assert await async_migrate_entry(hass, entry)
     assert len(entry.subentries) == 1
+
+
+async def test_v020_migration_preserves_subentries_entities_and_options(
+    hass: HomeAssistant,
+    source_light: er.RegistryEntry,
+    power_switch: er.RegistryEntry,
+) -> None:
+    """The behavior-fix migration changes only the config minor version."""
+    subentry = ConfigSubentry(
+        data={
+            CONF_SOURCE: source_light.id,
+            CONF_POWER: power_switch.id,
+        },
+        subentry_type=SUBENTRY_TYPE_MANAGED_LIGHT,
+        title="Source",
+        unique_id=source_light.id,
+    )
+    original_options = {
+        CONF_RETRY_INITIAL: 3,
+        CONF_RETRY_MAX: 30,
+        CONF_VERIFICATION_DELAY: 1,
+        CONF_VERIFICATION_TOLERANCE: "normal",
+        CONF_COMMAND_EXPIRY: 300,
+        CONF_PERSISTENT_RETRY: True,
+        CONF_DIAGNOSTIC_ATTRIBUTES: True,
+        CONF_EMIT_EVENTS: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="ReliableLight",
+        data={CONF_SOURCES: [source_light.id]},
+        options=original_options,
+        version=2,
+        minor_version=1,
+        subentries_data=[subentry.as_dict()],
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    proxy = registry.async_get_or_create(
+        "light",
+        DOMAIN,
+        source_light.id,
+        config_entry=entry,
+        config_subentry_id=subentry.subentry_id,
+        suggested_object_id="source_reliable",
+    )
+    registry.async_update_entity(
+        proxy.entity_id,
+        new_entity_id="light.preserved_reliable",
+    )
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.version == 2
+    assert entry.minor_version == 2
+    assert dict(entry.options) == original_options
+    assert ReliableLightOptions.from_entry(entry).power_recovery_delay == 2
+    assert entry.data == {CONF_SOURCES: [source_light.id]}
+    assert entry.subentries[subentry.subentry_id].data == {
+        CONF_SOURCE: source_light.id,
+        CONF_POWER: power_switch.id,
+    }
+    assert (
+        registry.async_get_entity_id("light", DOMAIN, source_light.id)
+        == "light.preserved_reliable"
+    )
 
 
 async def test_subentry_add_reconfigure_and_delete(

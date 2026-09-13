@@ -4,6 +4,16 @@ All notable changes are documented here. ReliableLight follows Semantic
 Versioning, and the version in `manifest.json` matches each GitHub release tag
 without the leading `v`.
 
+## 0.2.1 - 2026-09-12
+
+- Treat upstream power as a recovery dependency instead of normal lifecycle
+  power control.
+- Leave power on after healthy source turn-on and turn-off commands.
+- Perform at most one recovery power cycle per turn-on generation when a
+  powered source is unavailable.
+- Remove power only as a verified turn-off fallback for an unavailable source.
+- Add a configurable recovery delay and detailed recovery/fallback diagnostics.
+
 ## 0.2.0 - 2026-09-12
 
 - Move managed sources to Home Assistant config subentries while preserving

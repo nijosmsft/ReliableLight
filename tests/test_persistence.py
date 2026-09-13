@@ -30,6 +30,7 @@ def persistent_options(expiry: int = 300) -> ReliableLightOptions:
     return ReliableLightOptions(
         retry_initial=0.01,
         retry_max=0.02,
+        power_recovery_delay=0,
         verification_delay=0,
         tolerance_name="normal",
         command_expiry=expiry,
